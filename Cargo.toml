@@ -3,3 +3,5 @@ members = [
     "gossip",
     "dnd"
 ]
+
+workspace.resolver = "2"
