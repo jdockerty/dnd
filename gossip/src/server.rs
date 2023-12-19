@@ -69,8 +69,10 @@ impl Server {
 
     async fn read(&self) -> Result<()> {
         self.socket.readable().await?;
-        let mut buf = vec![0; 1024];
+        let mut buf = Vec::new();
+        buf.resize(4096, 0);
         let (n, _addr) = self.socket.recv_from(&mut buf).await?;
+        buf.truncate(n);
 
         if n == 0 {
             return Err(anyhow!("Empty data"));
