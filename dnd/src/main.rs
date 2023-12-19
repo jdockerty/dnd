@@ -1,11 +1,12 @@
 use anyhow::Result;
 use clap::Parser;
-use gossip::server::{Peer, Server};
 use std::sync::Arc;
 use tokio::net::UdpSocket;
 
+mod gossip;
+
 #[derive(Parser, Debug)]
-struct Kv {
+struct App {
     #[arg(long, short, default_value = "5000")]
     port: String,
 
@@ -13,7 +14,7 @@ struct Kv {
     address: String,
 
     #[arg(long, short)]
-    join: Option<Peer>,
+    join: Option<gossip::Peer>,
 
     #[arg(long, short)]
     start: bool,
@@ -21,22 +22,22 @@ struct Kv {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let kv = Kv::parse();
-    let addr = format!("{}:{}", kv.address, kv.port);
+    let app = App::parse();
+    let addr = format!("{}:{}", app.address, app.port);
     let socket = Arc::new(UdpSocket::bind(addr).await.unwrap());
-    let server = Server::new(socket.clone())?;
+    let server = gossip::Server::new(socket.clone())?;
     println!("Running on {}", socket.clone().local_addr().unwrap());
 
-    if kv.start && kv.join.is_some() {
+    if app.start && app.join.is_some() {
         println!("--join and --start are mutually exclusive");
     };
 
-    if kv.start {
-        server.run(gossip::server::Operation::Start).await?;
+    if app.start {
+        server.run(gossip::Operation::Start).await?;
     }
 
     server
-        .run(gossip::server::Operation::Join(kv.join.unwrap()))
+        .run(gossip::Operation::Join(app.join.unwrap()))
         .await?;
 
     Ok(())
