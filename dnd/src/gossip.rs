@@ -20,13 +20,13 @@ pub enum Operation {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Message {
     peers: Vec<Peer>,
+    update: Update,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Update {
     timestamp: chrono::DateTime<chrono::Utc>,
-    key: String,
-    value: serde_json::Value,
+    store: Arc<DashMap<String, serde_json::Value>>,
 }
 
 #[derive(Clone)]
@@ -34,7 +34,7 @@ pub struct Server {
     local: Peer,
     peers: Arc<RwLock<Vec<Peer>>>,
     socket: Arc<UdpSocket>,
-    store: Arc<DashMap<String, serde_json::Value>>,
+    pub store: Arc<DashMap<String, serde_json::Value>>,
     // liveness: Arc<RwLock<HashMap<Peer, tokio::time::Instant>>>,
 }
 
@@ -60,9 +60,16 @@ impl Server {
 
         let i = rng.gen_range(0..peers.len());
 
+        let update = Update {
+            timestamp: Utc::now(),
+            store: self.store.clone(),
+        };
+
         let message = serde_json::to_vec(&Message {
             peers: peers.to_vec(),
+            update,
         })?;
+
         let chosen = peers[i].clone();
 
         if chosen == self.local {
@@ -91,14 +98,31 @@ impl Server {
         for peer in &incoming.peers {
             if self.peers.read().await.contains(peer) {
                 println!("Exists, skipping");
+                for k in incoming.update.store.iter() {
+                    match self.store.entry(k.to_string()) {
+                        dashmap::mapref::entry::Entry::Vacant(_) => {
+                            self.store.insert(k.key().to_string(), k.value().clone());
+                        }
+                        dashmap::mapref::entry::Entry::Occupied(_) => {
+                            // TODO: liveness for comparing timestamps
+                            self.store.insert(k.key().to_string(), k.value().clone());
+                        }
+                    }
+                }
                 continue;
             } else {
                 if *peer == self.local {
                     println!("Not adding self");
                     continue;
                 }
+
                 let mut write = self.peers.write().await;
                 write.push(peer.clone());
+                for k in incoming.update.store.iter() {
+                    self.store
+                        .entry(k.key().to_string())
+                        .or_insert(k.value().clone());
+                }
             }
         }
 
@@ -111,8 +135,12 @@ impl Server {
         loop {
             interval.tick().await;
             tokio::select! {
-                _ = self.read() => {}
-                _ = self.write() => {}
+                _ = self.read() => {
+                println!("KV {:?}", self.store);
+                }
+                _ = self.write() => {
+                println!("KV {:?}", self.store);
+                }
             }
         }
     }
@@ -134,6 +162,12 @@ impl Server {
                     self.socket.writable().await?;
                     let msg = serde_json::to_vec(&Message {
                         peers: vec![self.local.clone()],
+                        update: Update {
+                            // This is a hack to make sure we don't overwrite the
+                            // store with an empty one.
+                            timestamp: Utc::now() - Duration::from_secs(6000),
+                            store: self.store.clone(),
+                        },
                     })?;
                     match self.socket.try_send_to(&msg, peer.address) {
                         Ok(_) => println!("Sent to {}", peer.address),
