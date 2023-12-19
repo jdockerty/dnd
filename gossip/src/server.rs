@@ -1,85 +1,167 @@
-use anyhow::Result;
-use std::{net::Ipv4Addr, str::FromStr, sync::Arc, time::Duration};
-use tokio::io::AsyncReadExt;
+use anyhow::{anyhow, Result};
+use rand::prelude::*;
+use serde::{Deserialize, Serialize};
+use std::net::SocketAddr;
+use std::str::FromStr;
+use std::sync::Arc;
+use std::time::Duration;
 use tokio::{net::UdpSocket, sync::RwLock};
+
+pub enum Operation {
+    /// Start a new cluster.
+    Start,
+
+    /// Join an existing cluster, providing a singular known host within a cluster.
+    Join(Peer),
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct Hello(SocketAddr);
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Message {
+    peers: Vec<Peer>,
+}
 
 #[derive(Clone)]
 pub struct Server {
-    peers: Option<Arc<RwLock<Vec<Peer>>>>,
+    local: Peer,
+    peers: Arc<RwLock<Vec<Peer>>>,
     socket: Arc<UdpSocket>,
+    // liveness: Arc<RwLock<HashMap<Peer, tokio::time::Instant>>>,
 }
-
-const MULTICAST_ADDR: &str = "224.0.0.1";
-const GOSSIP_PORT: &str = "5000";
 
 impl Server {
-    pub fn new(seed_peers: Option<Arc<RwLock<Vec<Peer>>>>, socket: Arc<UdpSocket>) -> Self {
-        Self {
+    pub fn new(socket: Arc<UdpSocket>) -> Result<Self> {
+        let local = Peer {
+            address: socket.local_addr()?,
+        };
+
+        Ok(Self {
+            local: local.clone(),
+            peers: Arc::new(RwLock::new(vec![local.clone()])),
             socket,
-            peers: seed_peers,
-        }
+            // liveness: Arc::new(RwLock::new(HashMap::new())),
+        })
     }
 
-    async fn write_peers(&self) {
-        self.socket.writable().await.unwrap();
-        if let Some(peers) = self.peers().await.unwrap() {
-            println!("Writing to known peers");
-            self.socket.send(b"PEERS...\n").await.unwrap();
-        } else {
-            println!("No peers");
-            self.socket.writable().await.unwrap();
-            self.socket.send(b"NONE\n").await.unwrap();
+    async fn write(&self) -> Result<()> {
+        self.socket.writable().await?;
+        let mut rng = thread_rng();
+        let peers = self.peers.read().await;
+
+        let i = rng.gen_range(0..peers.len());
+
+        let message = serde_json::to_vec(&Message {
+            peers: peers.to_vec(),
+        })?;
+        let chosen = peers[i].clone();
+
+        if chosen == self.local {
+            println!("Self chosen, skipping this round");
+            return Ok(());
         }
+
+        drop(peers);
+        self.socket.send_to(&message, chosen.address).await?;
+        Ok(())
     }
 
-    async fn read_peers(&self) {
-        let mut buf = [0; 1024];
-        match self.socket.try_recv(&mut buf) {
-            Ok(_r) => {
-                println!("Got: {buf:?}");
+    async fn read(&self) -> Result<()> {
+        self.socket.readable().await?;
+        let mut buf = vec![0; 1024];
+        let (n, _addr) = self.socket.recv_from(&mut buf).await?;
+
+        if n == 0 {
+            return Err(anyhow!("Empty data"));
+        }
+
+        let incoming: Message = serde_json::from_slice(&buf[..n])?;
+
+        for peer in &incoming.peers {
+            if self.peers.read().await.contains(peer) {
+                println!("Exists, skipping");
+                continue;
+            } else {
+                if *peer == self.local {
+                    println!("Not adding self");
+                    continue;
+                }
+                let mut write = self.peers.write().await;
+                write.push(peer.clone());
             }
-            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                // No data available yet, continue or sleep and try again
-                println!("No data available yet");
-            }
-            Err(e) => println!("Unable to read: {e}"),
         }
+
+        Ok(())
     }
 
-    pub async fn run(self) -> Result<()> {
-        println!("Running server");
-        self.socket
-            .join_multicast_v4(
-                Ipv4Addr::from_str(MULTICAST_ADDR).unwrap(),
-                Ipv4Addr::UNSPECIFIED,
-            )
-            .unwrap();
+    async fn event_loop(&self) -> Result<()> {
+        let mut interval = tokio::time::interval(Duration::from_millis(500));
 
-        println!("Connecting to: {}:{}", MULTICAST_ADDR, GOSSIP_PORT);
-        self.socket
-            .connect(format!("{}:{}", MULTICAST_ADDR, GOSSIP_PORT))
-            .await
-            .unwrap();
-
-        let mut interval = tokio::time::interval(Duration::from_secs(2));
         loop {
             interval.tick().await;
-            self.read_peers().await;
-            self.write_peers().await;
+            tokio::select! {
+                _ = self.read() => {
+                println!("Read Peers: {:?}", self.peers.read().await);
+                }
+                _ = self.write() => {
+                println!("Write Peers: {:?}", self.peers.read().await);
+                }
+            }
         }
     }
 
-    pub async fn peers(&self) -> Result<Option<Vec<Peer>>> {
-        if let Some(peers) = &self.peers {
-            let peers = peers.read().await;
-            Ok(Some(peers.to_vec()))
-        } else {
-            Ok(None)
+    pub async fn run(&self, op: Operation) -> Result<()> {
+        match op {
+            Operation::Start => {
+                println!("Starting new cluster");
+                self.event_loop().await?;
+            }
+            Operation::Join(peer) => {
+                println!("Joining cluster using {} as known peer", peer.address);
+                tokio::time::sleep(Duration::from_secs(2)).await;
+
+                // UDP is unreliable, so send it a few times.
+                // We could use TCP here for reliable delivery of initial sync
+                // (like serf), but I'm not interested in getting fully into the
+                // weeds of gossip for this project.
+                for _ in 0..=5 {
+                    self.socket.writable().await?;
+                    let msg = serde_json::to_vec(&Message {
+                        peers: vec![self.local.clone()],
+                    })?;
+                    match self.socket.try_send_to(&msg, peer.address) {
+                        Ok(_) => println!("Sent to {}", peer.address),
+                        Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                            println!("Would block");
+                        }
+                        Err(e) => {
+                            println!("Error with {}: {e}", peer.address);
+                        }
+                    }
+                    tokio::time::sleep(Duration::from_millis(150)).await;
+                }
+
+                self.event_loop().await?;
+            }
         }
+        Ok(())
     }
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, Hash, PartialEq)]
 pub struct Peer {
-    address: String,
+    pub address: SocketAddr,
+}
+
+impl FromStr for Peer {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        // Parse the string into a SocketAddr
+        match s.parse() {
+            Ok(address) => Ok(Peer { address }),
+            Err(err) => Err(format!("Failed to parse peer: {}", err)),
+        }
+    }
 }
