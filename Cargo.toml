@@ -3,4 +3,4 @@ members = [
     "dnd"
 ]
 
-workspace.resolver = "2"
+resolver = "2"

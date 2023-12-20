@@ -87,7 +87,7 @@ async fn main() -> Result<()> {
 
     let state = server.kv.clone();
     tokio::spawn(async move {
-        info!("Spawning HTTP API");
+        info!("Starting HTTP API");
         let server = Router::new()
             .route("/health", get(health))
             .route("/kv/:key", get(get_key))
@@ -96,7 +96,7 @@ async fn main() -> Result<()> {
 
         let addr = format!("{}:{}", app.address, app.server_port);
         let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
-        info!("listening on {}", listener.local_addr().unwrap());
+        info!("Listening for HTTP on {}", listener.local_addr().unwrap());
         axum::serve(listener, server).await.unwrap();
     });
 

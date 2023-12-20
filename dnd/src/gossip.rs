@@ -159,7 +159,7 @@ impl Server {
                 update: Update(self.kv.clone()),
             })?;
             match self.socket.try_send_to(&msg, peer.address) {
-                Ok(_) => println!("Sent to {}", peer.address),
+                Ok(_) => debug!("Initial update sent to {}", peer.address),
                 Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                     error!("Would block");
                 }
