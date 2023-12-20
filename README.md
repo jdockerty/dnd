@@ -16,7 +16,8 @@ As `dnd` is inspired by Dynamo, it matches some of their initial criteria:
 _TODO:_
 
 - Failure detection, currently a node is not considered unhealthy if it goes away, UDP packets are simply sent into the void.
-- Consistent hashing (mentioned above)
+- Consistent hashing (mentioned above).
+- Key deletion.
 
 
 ## How it works
