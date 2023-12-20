@@ -63,25 +63,29 @@ impl Server {
     async fn write(&self) -> Result<()> {
         self.socket.writable().await?;
         let mut rng = thread_rng();
-        let peers = self.peers.read().await;
+        let peers = self.peers.read().await.to_vec();
+        let peers: Vec<Peer> = peers
+            .iter()
+            .map(|p| p.to_owned())
+            .filter(|p| *p != self.local)
+            .collect();
 
-        let i = rng.gen_range(0..peers.len());
-
-        let update = Update(self.kv.clone());
-
-        let message = serde_json::to_vec(&Message {
-            peers: peers.to_vec(),
-            update,
-        })?;
-
-        let chosen = peers[i].clone();
-
-        if chosen == self.local {
-            debug!("Self chosen, skipping this round");
+        // If we're the only peer in the filtered vector, don't send anything.
+        // There is no need to send messages to ourselves.
+        if peers.is_empty() {
+            debug!("No peers in cluster.");
             return Ok(());
         }
 
+        let i = rng.gen_range(0..peers.len());
+        let chosen = peers[i].clone();
+        let update = Update(self.kv.clone());
+        let message = serde_json::to_vec(&Message {
+            peers: peers.clone(),
+            update,
+        })?;
         drop(peers);
+
         self.socket.send_to(&message, chosen.address).await?;
         Ok(())
     }
