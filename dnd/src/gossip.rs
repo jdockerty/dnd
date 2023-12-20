@@ -1,5 +1,6 @@
 use anyhow::{anyhow, Result};
 use chrono::prelude::*;
+use dashmap::mapref::entry::Entry::{Occupied, Vacant};
 use dashmap::DashMap;
 use rand::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -8,14 +9,6 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::{net::UdpSocket, sync::RwLock};
-
-pub enum Operation {
-    /// Start a new cluster.
-    Start,
-
-    /// Join an existing cluster, providing a singular known host within a cluster.
-    Join(Peer),
-}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Message {
@@ -100,10 +93,10 @@ impl Server {
                 println!("Exists, skipping");
                 for k in incoming.update.store.iter() {
                     match self.store.entry(k.to_string()) {
-                        dashmap::mapref::entry::Entry::Vacant(_) => {
+                        Vacant(_) => {
                             self.store.insert(k.key().to_string(), k.value().clone());
                         }
-                        dashmap::mapref::entry::Entry::Occupied(_) => {
+                        Occupied(_) => {
                             // TODO: liveness for comparing timestamps
                             self.store.insert(k.key().to_string(), k.value().clone());
                         }
@@ -145,45 +138,43 @@ impl Server {
         }
     }
 
-    pub async fn run(&self, op: Operation) -> Result<()> {
-        match op {
-            Operation::Start => {
-                println!("Starting new cluster");
-                self.event_loop().await?;
-            }
-            Operation::Join(peer) => {
-                println!("Joining cluster using {} as known peer", peer.address);
+    pub async fn start(&self) -> Result<()> {
+        println!("Starting new cluster");
+        self.event_loop().await?;
+        Ok(())
+    }
 
-                // UDP is unreliable, so send it a few times.
-                // We could use TCP here for reliable delivery of initial sync
-                // (like serf), but I'm not interested in getting fully into the
-                // weeds of gossip for this project.
-                for _ in 0..=3 {
-                    self.socket.writable().await?;
-                    let msg = serde_json::to_vec(&Message {
-                        peers: vec![self.local.clone()],
-                        update: Update {
-                            // This is a hack to make sure we don't overwrite the
-                            // store with an empty one.
-                            timestamp: Utc::now() - Duration::from_secs(6000),
-                            store: self.store.clone(),
-                        },
-                    })?;
-                    match self.socket.try_send_to(&msg, peer.address) {
-                        Ok(_) => println!("Sent to {}", peer.address),
-                        Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                            println!("Would block");
-                        }
-                        Err(e) => {
-                            println!("Error with {}: {e}", peer.address);
-                        }
-                    }
-                    tokio::time::sleep(Duration::from_millis(150)).await;
+    pub async fn join(&self, peer: Peer) -> Result<()> {
+        println!("Joining cluster using {} as known peer", peer.address);
+
+        // UDP is unreliable, so send it a few times.
+        // We could use TCP here for reliable delivery of initial sync
+        // (like serf), but I'm not interested in getting fully into the
+        // weeds of gossip for this project.
+        for _ in 0..=3 {
+            self.socket.writable().await?;
+            let msg = serde_json::to_vec(&Message {
+                peers: vec![self.local.clone()],
+                update: Update {
+                    // This is a hack to make sure we don't overwrite the
+                    // store with an empty one.
+                    timestamp: Utc::now() - Duration::from_secs(6000),
+                    store: self.store.clone(),
+                },
+            })?;
+            match self.socket.try_send_to(&msg, peer.address) {
+                Ok(_) => println!("Sent to {}", peer.address),
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    println!("Would block");
                 }
-
-                self.event_loop().await?;
+                Err(e) => {
+                    println!("Error with {}: {e}", peer.address);
+                }
             }
+            tokio::time::sleep(Duration::from_millis(150)).await;
         }
+
+        self.event_loop().await?;
         Ok(())
     }
 }
