@@ -12,6 +12,31 @@ As `dnd` is inspired by Dynamo, it matches some of their initial criteria:
 - Replication: The current implementation does not use consistent hashing, the trade-off here is that the entire K-V store is replicated to all nodes, based on the latest `AtomicU64` counter. This would have major downsides in a huge cluster of nodes; however, it does mean that any node can respond to a `get(key)`.
 - Availability: Writes are never rejected, the "last write wins".
 
-**TODO: fill in during impl**
+
+_TODO:_
+
+- Failure detection, currently a node is not considered unhealthy if it goes away, UDP packets are simply sent into the void.
+- Consistent hashing (mentioned above)
+
+
+## How it works
+
+The `gossip` implementation and a HTTP server run on separate threads. The HTTP server is used to accept `get` and `put` operations
+via HTTP requests. For example
+
+```bash
+curl -X POST localhost:6000/kv/user1 -d '{"name": "Jack"}'
+```
+
+The above will _put_ a key called `user1` with the JSON payload provided into the store, provided via [`dashmap`](https://docs.rs/dashmap/latest/dashmap/).
+
+Whilst the HTTP server waits for requests to cover `get(key)` and `put(key, data)` operations, the key-value store functionality is handled by my stripped down implementation of the [SWIM](https://www.cs.cornell.edu/projects/Quicksilver/public_pdfs/SWIM.pdf), a gossip protocol.
+A node can either `start` a new cluster or `join` and existing one by specifying a known `Peer`. At every interval, either a `read` or `write` operation will occur:
+
+- Write means that a random peer node will be selected to send an `Update` to, containing the store and an atomic counter.
+- Read means that a UDP datagram will be read from the bound socket to unmarshal, which does not always contain new information.
+
+The most up to date `DashMap` will always win in this case, this is tracked by an `AtomicU64` counter. When a put operation occurs, the counter is incremented. This means that if a read
+sees that the incoming data is more up to date than its own, its `DashMap` will be replaced by the one contained in the `Update`.
 
 
