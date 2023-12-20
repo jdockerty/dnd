@@ -1,17 +1,20 @@
 use anyhow::Result;
 use axum::body::Body;
 use axum::extract::{Path, State};
-use axum::http::{Response, StatusCode};
+use axum::http::Response;
 use axum::{
     body::Bytes,
     routing::{get, post},
     Router,
 };
 use clap::{Parser, Subcommand};
+use clap_verbosity_flag::{InfoLevel, Verbosity};
 use dashmap::mapref::entry::Entry::{Occupied, Vacant};
-use dashmap::DashMap;
+use gossip::Kv;
+use std::sync::atomic::Ordering::SeqCst;
 use std::sync::Arc;
 use tokio::net::UdpSocket;
+use tracing::info;
 
 mod gossip;
 
@@ -25,6 +28,9 @@ struct App {
 
     #[arg(long, short, default_value = "127.0.0.1")]
     address: String,
+
+    #[command(flatten)]
+    verbose: Verbosity<InfoLevel>,
 
     #[command(subcommand)]
     cmds: Commands,
@@ -42,12 +48,9 @@ enum Commands {
     },
 }
 
-async fn get_key(
-    Path(key): Path<String>,
-    State(mapping): State<Arc<DashMap<String, serde_json::Value>>>,
-) -> Response<Body> {
+async fn get_key(Path(key): Path<String>, State(state): State<Arc<Kv>>) -> Response<Body> {
     // Use the entry API to avoid locking entire map on key retrieval.
-    match mapping.entry(key) {
+    match state.store.entry(key) {
         Vacant(_) => Response::builder()
             .status(404)
             .body(Body::from("None"))
@@ -61,11 +64,12 @@ async fn get_key(
 
 async fn put_key(
     Path(key): Path<String>,
-    State(mapping): State<Arc<DashMap<String, serde_json::Value>>>,
+    State(state): State<Arc<Kv>>,
     body: Bytes,
 ) -> Response<Body> {
     let value = serde_json::from_slice::<serde_json::Value>(&body).unwrap();
-    mapping.insert(key, value);
+    state.store.insert(key, value);
+    state.counter.fetch_add(1, SeqCst);
     Response::new("OK".into())
 }
 
@@ -78,21 +82,21 @@ async fn main() -> Result<()> {
     let app = App::parse();
     let addr = format!("{}:{}", app.address, app.port);
     let socket = Arc::new(UdpSocket::bind(addr).await.unwrap());
-    let server = gossip::Server::new(socket.clone())?;
-    println!("Running on {}", socket.clone().local_addr().unwrap());
+    let server = gossip::Server::new(socket.clone(), app.verbose)?;
+    info!("Running on {}", socket.clone().local_addr().unwrap());
 
-    let mapping = server.store.clone();
+    let state = server.kv.clone();
     tokio::spawn(async move {
-        println!("Spawning HTTP API");
+        info!("Spawning HTTP API");
         let server = Router::new()
             .route("/health", get(health))
             .route("/kv/:key", get(get_key))
             .route("/kv/:key", post(put_key))
-            .with_state(mapping);
+            .with_state(state.into());
 
         let addr = format!("{}:{}", app.address, app.server_port);
         let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
-        println!("listening on {}", listener.local_addr().unwrap());
+        info!("listening on {}", listener.local_addr().unwrap());
         axum::serve(listener, server).await.unwrap();
     });
 
