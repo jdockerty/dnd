@@ -1,6 +1,6 @@
 # dnd (definitely not dynamo)
 
-A distributed key-value store, inspired by [Amazon's Dynamo](https://www.amazon.science/publications/dynamo-amazons-highly-available-key-value-store) implementation.
+A toy implementation of a distributed key-value store, inspired by [Amazon's Dynamo](https://www.amazon.science/publications/dynamo-amazons-highly-available-key-value-store) implementation.
 
 After reading their paper, I wanted to implement something similar so I whipped up a stripped down version with my own quirks - `dnd` is the result of that.
 
